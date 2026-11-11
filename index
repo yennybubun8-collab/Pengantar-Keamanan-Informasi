@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard Admin Presensi</title>
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="layout">
+  <aside>
+    <div class="brand">Presensi<span>Ku</span></div>
+    <button class="nav active" data-tab="peserta">Daftar Peserta</button>
+    <button class="nav" data-tab="presensi">Input Presensi</button>
+    <button class="nav" data-tab="rekap">Rekap Presensi</button>
+    <button class="nav" data-tab="sesi">Sesi / Pertemuan</button>
+    <div class="who"><span id="nama"></span><br><button class="btn" id="logout" style="margin-top:8px;min-height:36px">Keluar</button></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<dialog id="dlg"><form id="dform" method="dialog"></form></dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url, method = 'GET', body) {
+  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 401) { location.href = '/login.html'; throw 0; }
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || 'Terjadi kesalahan'); throw 0; }
+  return d;
+}
+const chip = s => `<span class="chip ${s || 'belum'}">${s ? s[0].toUpperCase() + s.slice(1) : 'Belum'}</span>`;
+const fmtWaktu = w => w ? w.replace('T', ' ').slice(0, 16) : '–';
+let prodi = [];
+let timer = null;
+
+api('/api/me').then(m => $('#nama').textContent = m.nama);
+$('#logout').onclick = async () => { await api('/api/logout', 'POST'); location.href = '/login.html'; };
+document.querySelectorAll('.nav').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
+  clearInterval(timer);
+  b.classList.add('active'); views[b.dataset.tab]();
+});
+
+function modal(html, onSubmit) {
+  const f = $('#dform'); f.innerHTML = html;
+  f.onsubmit = async e => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    e.preventDefault();
+    await onSubmit(Object.fromEntries(new FormData(f)));
+    $('#dlg').close();
+  };
+  $('#dlg').showModal();
+}
+const prodiOpts = sel => prodi.map(p => `<option value="${p.id}" ${p.id == sel ? 'selected' : ''}>${esc(p.nama_prodi)}</option>`).join('');
+
+const views = {
+  async peserta() {
+    prodi = await api('/api/prodi');
+    $('#main').innerHTML = `
+      <header class="top"><h2>Daftar Peserta</h2><button class="btn primary" id="add">+ Tambah Peserta</button></header>
+      <div class="bar"><input id="q" placeholder="Cari nama / NIM…" aria-label="Cari peserta">
+        <select id="fp" aria-label="Filter prodi"><option value="">Semua Prodi</option>${prodiOpts()}</select></div>
+      <div class="tw"><table><thead><tr><th>NIM</th><th>Nama</th><th>Prodi</th><th>Kartu RFID</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>`;
+    const load = async () => {
+      const rows = await api(`/api/peserta?q=${encodeURIComponent($('#q').value)}&prodi_id=${$('#fp').value}`);
+      $('#tb').innerHTML = rows.map(r => `<tr><td>${esc(r.nim)}</td><td><b>${esc(r.nama)}</b></td><td>${esc(r.nama_prodi)}</td>
+        <td>${r.rfid_uid ? esc(r.rfid_uid) : '<span class="muted">belum ada</span>'}</td>
+        <td><button class="btn" data-e="${r.id}">Edit</button> <button class="btn danger" data-d="${r.id}">Hapus</button></td></tr>`).join('')
+        || '<tr><td colspan="5">Belum ada data</td></tr>';
+      $('#tb').querySelectorAll('[data-e]').forEach(b => b.onclick = () => form(rows.find(r => r.id == b.dataset.e)));
+      $('#tb').querySelectorAll('[data-d]').forEach(b => b.onclick = async () => {
+        if (confirm('Hapus peserta ini beserta riwayat presensinya?')) { await api('/api/peserta/' + b.dataset.d, 'DELETE'); load(); }
+      });
+    };
+    const form = (p = {}) => {
+      modal(`
+      <h2>${p.id ? 'Edit' : 'Tambah'} Peserta</h2>
+      <label>NIM<input name="nim" required value="${esc(p.nim)}"></label>
+      <label>Nama<input name="nama" required value="${esc(p.nama)}"></label>
+      <label>Prodi<select name="prodi_id">${prodiOpts(p.prodi_id)}</select></label>
+      <label>Kartu RFID (UID)<input name="rfid_uid" value="${esc(p.rfid_uid)}" placeholder="Tempelkan kartu, lalu klik tombol di bawah"></label>
+      <button type="button" class="btn" id="getuid">Ambil dari scan terakhir</button>
+      <div class="row"><button class="btn" value="cancel" formnovalidate>Batal</button><button class="btn primary">Simpan</button></div>`,
+      async d => { await api(p.id ? '/api/peserta/' + p.id : '/api/peserta', p.id ? 'PUT' : 'POST', d); load(); });
+      $('#getuid').onclick = async () => {
+        const s = await api('/api/scan/terakhir');
+        if (s.uid) document.querySelector('[name=rfid_uid]').value = s.uid;
+        else alert('Belum ada kartu yang discan dalam 2 menit terakhir. Tempelkan kartu ke alat dulu.');
+      };
+    };
+    $('#add').onclick = () => form();
+    $('#q').oninput = load; $('#fp').onchange = load; load();
+  },
+
+  async presensi() {
+    const sesi = await api('/api/sesi');
+    const aktif = await api('/api/sesi-aktif');
+    $('#main').innerHTML = `
+      <header class="top"><h2>Input Presensi</h2><span class="muted" id="info"></span></header>
+      <div class="bar"><select id="ss" aria-label="Pilih sesi">${sesi.map(s => `<option value="${s.id}" ${s.id === aktif.id ? 'selected' : ''}>${esc(s.judul)} · ${esc(s.tanggal)}</option>`).join('') || '<option value="">Buat sesi dulu</option>'}</select>
+        <button class="btn primary" id="act">Jadikan sesi aktif (untuk alat RFID)</button></div>
+      <div class="tw"><table><thead><tr><th>Nama</th><th>Prodi</th><th>Waktu</th><th>Status</th><th>Ubah</th></tr></thead><tbody id="tb"></tbody></table></div>`;
+    let aktifId = aktif.id;
+    const info = () => { $('#info').textContent = aktifId ? (aktifId == $('#ss').value ? '● Sesi ini aktif untuk scan kartu' : 'Sesi aktif untuk alat: sesi lain') : 'Belum ada sesi aktif'; };
+    const load = async () => {
+      if (!$('#ss').value) return;
+      const rows = await api('/api/presensi?sesi_id=' + $('#ss').value);
+      $('#tb').innerHTML = rows.map(r => `<tr><td><b>${esc(r.nama)}</b></td><td>${esc(r.nama_prodi)}</td><td>${fmtWaktu(r.waktu_presensi)}</td><td>${chip(r.status)}</td>
+        <td><select data-p="${r.peserta_id}" aria-label="Status ${esc(r.nama)}">
+          ${['', 'hadir', 'izin', 'sakit', 'alpa'].map(s => `<option value="${s}" ${s === (r.status || '') ? 'selected' : ''}>${s || '—'}</option>`).join('')}
+        </select></td></tr>`).join('');
+      $('#tb').querySelectorAll('select').forEach(s => s.onchange = async () => {
+        if (!s.value) return;
+        await api('/api/presensi', 'POST', { peserta_id: s.dataset.p, sesi_id: $('#ss').value, status: s.value });
+        load();
+      });
+      info();
+    };
+    $('#act').onclick = async () => {
+      if (!$('#ss').value) return;
+      await api('/api/sesi-aktif', 'POST', { sesi_id: $('#ss').value });
+      aktifId = Number($('#ss').value); info();
+    };
+    $('#ss').onchange = load; load();
+    // otomatis segarkan tiap 3 detik supaya scan kartu langsung muncul
+    timer = setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== 'SELECT' || document.activeElement.id === 'ss') load(); }, 3000);
+  },
+
+  async rekap() {
+    const rows = await api('/api/rekap');
+    $('#main').innerHTML = `
+      <header class="top"><h2>Rekap Presensi per Peserta</h2><a class="btn primary" href="/api/rekap.csv" style="display:inline-grid;place-items:center;text-decoration:none">Ekspor CSV</a></header>
+      <div class="tw"><table><thead><tr><th>Nama</th><th>Prodi</th><th>Hadir</th><th>Izin</th><th>Sakit</th><th>Alpa</th><th>Kehadiran</th><th></th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td><b>${esc(r.nama)}</b></td><td>${esc(r.nama_prodi)}</td><td>${r.hadir}</td><td>${r.izin}</td><td>${r.sakit}</td><td>${r.alpa}</td>
+        <td><b>${r.persen}%</b> <span class="muted">(${r.hadir}/${r.total_sesi})</span></td><td><button class="btn" data-id="${r.id}" data-n="${esc(r.nama)}">Detail</button></td></tr>`).join('')
+        || '<tr><td colspan="8">Belum ada data</td></tr>'}</tbody></table></div>`;
+    document.querySelectorAll('[data-id]').forEach(b => b.onclick = async () => {
+      const h = await api('/api/rekap/' + b.dataset.id);
+      modal(`<h2>${b.dataset.n}</h2>
+        <div style="max-height:50vh;overflow:auto"><table><tbody>${h.map(x => `<tr><td>${esc(x.judul)}<br><span class="muted">${esc(x.tanggal)}</span></td><td>${chip(x.status)}</td></tr>`).join('')}</tbody></table></div>
+        <div class="row"><button class="btn primary" value="cancel">Tutup</button></div>`, async () => {});
+    });
+  },
+
+  async sesi() {
+    const rows = await api('/api/sesi');
+    $('#main').innerHTML = `
+      <header class="top"><h2>Sesi / Pertemuan</h2></header>
+      <form id="sf" class="card grid2">
+        <label>Judul<input name="judul" required placeholder="Pertemuan 1"></label>
+        <label>Tanggal<input name="tanggal" type="date" required></label>
+        <label>Mulai<input name="jam_mulai" type="time"></label>
+        <label>Selesai<input name="jam_selesai" type="time"></label>
+        <button class="btn primary">Tambah Sesi</button>
+      </form>
+      <div class="tw"><table><thead><tr><th>Judul</th><th>Tanggal</th><th>Jam</th><th></th></tr></thead>
+      <tbody>${rows.map(s => `<tr><td><b>${esc(s.judul)}</b></td><td>${esc(s.tanggal)}</td><td>${esc(s.jam_mulai || '–')} – ${esc(s.jam_selesai || '–')}</td>
+        <td><button class="btn danger" data-d="${s.id}">Hapus</button></td></tr>`).join('') || '<tr><td colspan="4">Belum ada sesi</td></tr>'}</tbody></table></div>`;
+    $('#sf').onsubmit = async e => { e.preventDefault(); await api('/api/sesi', 'POST', Object.fromEntries(new FormData(e.target))); views.sesi(); };
+    document.querySelectorAll('[data-d]').forEach(b => b.onclick = async () => {
+      if (confirm('Hapus sesi ini beserta presensinya?')) { await api('/api/sesi/' + b.dataset.d, 'DELETE'); views.sesi(); }
+    });
+  }
+};
+views.peserta();
+</script></body></html>
